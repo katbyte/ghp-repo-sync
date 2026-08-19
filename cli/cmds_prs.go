@@ -14,6 +14,28 @@ import (
 
 func CmdPRs(_ *cobra.Command, _ []string) error {
 	f := GetFlags()
+
+	var mergedSince *time.Time
+	if f.Filters.MergedSince != "" {
+		t, err := time.Parse("2006-01-02", f.Filters.MergedSince)
+		if err != nil {
+			if t, err = time.Parse(time.RFC3339, f.Filters.MergedSince); err != nil {
+				return fmt.Errorf("parsing merged-since %q (expected YYYY-MM-DD or RFC3339): %w", f.Filters.MergedSince, err)
+			}
+		}
+		mergedSince = &t
+
+		hasMerged := false
+		for _, state := range f.Filters.States {
+			if strings.EqualFold(state, "MERGED") {
+				hasMerged = true
+			}
+		}
+		if !hasMerged {
+			return fmt.Errorf("--merged-since requires MERGED in --pr-states (currently %s)", strings.Join(f.Filters.States, ","))
+		}
+	}
+
 	p := gh.NewProject(f.ProjectOwner, f.ProjectNumber, f.Token)
 
 	c.Printf("Looking up project details for <green>%s</>/<lightGreen>%d</>...\n", f.ProjectOwner, f.ProjectNumber)
@@ -35,6 +57,25 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Println()
 
+	// validate pr fields against the project up front, dropping (or in strict mode erroring on)
+	// ones the project doesn't have so we only warn once rather than for every pr
+	var prFields []string
+	for _, fieldName := range f.PRFields {
+		if _, known := PRFields[fieldName]; !known {
+			return fmt.Errorf("unknown pr field %q, available: %s", fieldName, strings.Join(prFieldNames(), ", "))
+		}
+		if _, ok := p.FieldIDs[fieldName]; !ok {
+			if len(f.PRPopulateFields) > 0 || f.Strict {
+				return fmt.Errorf("pr field %q not found in project", fieldName)
+			}
+			c.Printf("<yellow>WARNING:</> pr field <lightBlue>%q</> not found in project, skipping\n", fieldName)
+			continue
+		}
+		prFields = append(prFields, fieldName)
+	}
+	f.PRFields = prFields
+	fmt.Println()
+
 	// Print config summary
 	c.Printf("<white>Configuration:</>\n")
 	c.Printf("  <lightBlue>repos</>:        ")
@@ -51,6 +92,15 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 	}
 	if len(f.Filters.Assignees) > 0 {
 		c.Printf("  <lightBlue>assignees</>:    <yellow>%s</>\n", strings.Join(f.Filters.Assignees, ", "))
+	}
+	if len(f.Filters.MergedBy) > 0 {
+		c.Printf("  <lightBlue>merged by</>:    <yellow>%s</>\n", strings.Join(f.Filters.MergedBy, ", "))
+	}
+	if mergedSince != nil {
+		c.Printf("  <lightBlue>merged since</>: <yellow>%s</>\n", mergedSince.Format("2006-01-02"))
+	}
+	if f.Filters.FiltersOnly {
+		c.Printf("  <lightBlue>filters only</>: <yellow>yes (prs already in project are not auto-included)</>\n")
 	}
 	if len(f.Filters.Reviewers) > 0 {
 		c.Printf("  <lightBlue>reviewers</>:    <yellow>%s</>\n", strings.Join(f.Filters.Reviewers, ", "))
@@ -89,21 +139,25 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 
 		// get all pull requests
 		c.Printf("Retrieving all prs for <white>%s</>/<cyan>%s</> with states <green>%s</>%s. Loaded ", r.Owner, r.Name, f.Filters.States, limitMsg)
-		prs, err := r.GetAllPullRequestsGQL(f.Filters.States, f.Filters.Reviewers, f.ItemLimit, func(i int) {
+		prs, err := r.GetAllPullRequestsGQL(f.Filters.States, f.Filters.Reviewers, f.ItemLimit, mergedSince, func(i int) {
 			fmt.Printf("%d ", i)
 		})
 		if err != nil {
 			return fmt.Errorf("getting PRs for %s/%s: %w", r.Owner, r.Name, err)
 		}
 		c.Printf("<yellow>%d</> items\n", len(*prs))
-		prs = FilterByFlags(f, prs)
+		prs, matchReasons := FilterByFlags(f, prs)
 
 		byStatus := map[string][]int{}
 
 		for i, pr := range *prs {
 			prNode := pr.NodeID
 
-			c.Printf("<white>%d</><gray>/%d</> Syncing pr <lightCyan>%d</> (<cyan>%s</>) to project.. ", i+1, len(*prs), pr.Number, prNode)
+			matched := ""
+			if why, ok := matchReasons[pr.Number]; ok {
+				matched = " <yellow>[" + why + "]</>"
+			}
+			c.Printf("<white>%d</><gray>/%d</> Syncing pr <lightCyan>%d</> (<cyan>%s</>)%s to project.. <darkGray>%s</>\n  ", i+1, len(*prs), pr.Number, prNode, matched, r.PrURL(pr.Number))
 
 			var iid *string
 			if !f.DryRun {
@@ -191,14 +245,10 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 				Status:      statusText,
 			}
 
-			// Build fields dynamically from registry
+			// Build fields dynamically from registry, f.PRFields was validated up front
 			var fields []gh.ProjectItemField
 			for _, fieldName := range f.PRFields {
-				fieldID, ok := p.FieldIDs[fieldName]
-				if !ok {
-					return fmt.Errorf("pr field %q not found in project", fieldName)
-				}
-
+				fieldID := p.FieldIDs[fieldName]
 				fieldDef := PRFields[fieldName]
 				value := fieldDef.ComputeFn(fieldCtx)
 				if value == nil {
@@ -211,6 +261,10 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 					Type:    fieldDef.Type,
 					Value:   value,
 				})
+
+				if f.DryRun {
+					c.Printf("    <gray>[dry-run]</> <lightBlue>%s</> = <white>%v</>\n", fieldName, displayFieldValue(p, fieldName, fieldDef.Type, value))
+				}
 			}
 
 			if !f.DryRun && iid != nil {
@@ -329,47 +383,62 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 	return nil
 }
 
-func FilterByFlags(f FlagData, prs *[]gh.PullRequest) *[]gh.PullRequest {
-	if len(f.Filters.Authors) == 0 && len(f.Filters.Assignees) == 0 {
-		return prs
+// FilterByFlags returns the PRs matching the user filters along with a map of pr number ->
+// why it matched. A nil map means no filters were active and everything was kept.
+func FilterByFlags(f FlagData, prs *[]gh.PullRequest) (*[]gh.PullRequest, map[int]string) {
+	if len(f.Filters.Authors) == 0 && len(f.Filters.Assignees) == 0 && len(f.Filters.MergedBy) == 0 {
+		return prs, nil
 	}
 
 	c.Printf(" filtering by authors: <yellow>%s:</>\n", f.Filters.Authors)
 	c.Printf(" filtering by assignees: <yellow>%s:</>\n", f.Filters.Assignees)
+	c.Printf(" filtering by merged by: <yellow>%s:</>\n", f.Filters.MergedBy)
 
-	// map of users
+	// map of users, lowercased as github logins are case-insensitive
 	authorMap := map[string]bool{}
 	for _, u := range f.Filters.Authors {
-		authorMap[u] = true
+		authorMap[strings.ToLower(u)] = true
 	}
 
 	assigneeUserMap := map[string]bool{}
 	for _, u := range f.Filters.Assignees {
-		assigneeUserMap[u] = true
+		assigneeUserMap[strings.ToLower(u)] = true
+	}
+
+	mergedByMap := map[string]bool{}
+	for _, u := range f.Filters.MergedBy {
+		mergedByMap[strings.ToLower(u)] = true
 	}
 
 	var filteredPRs []gh.PullRequest
+	reasons := map[int]string{}
 	for _, pr := range *prs {
-		add := false
+		reason := ""
 
-		if pr.AssociatedProjectNumbers[f.ProjectNumber] {
-			add = true
+		if !f.Filters.FiltersOnly && pr.AssociatedProjectNumbers[f.ProjectNumber] {
+			reason = "already in project"
 		}
 
-		if !add && authorMap[pr.Author] {
-			add = true
+		if reason == "" && authorMap[strings.ToLower(pr.Author)] {
+			reason = "author " + pr.Author
 		}
 
-		if !add {
+		if reason == "" {
 			for _, a := range pr.Assignees {
-				if assigneeUserMap[a] {
-					add = true
+				if assigneeUserMap[strings.ToLower(a)] {
+					reason = "assignee " + a
+					break
 				}
 			}
 		}
 
-		if add {
+		if reason == "" && mergedByMap[strings.ToLower(pr.MergedBy)] {
+			reason = "merged by " + pr.MergedBy
+		}
+
+		if reason != "" {
 			filteredPRs = append(filteredPRs, pr)
+			reasons[pr.Number] = reason
 		}
 	}
 
@@ -383,5 +452,5 @@ func FilterByFlags(f FlagData, prs *[]gh.PullRequest) *[]gh.PullRequest {
 	}
 	c.Printf("\n\n")
 
-	return &filteredPRs
+	return &filteredPRs, reasons
 }

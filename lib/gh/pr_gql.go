@@ -2,6 +2,7 @@ package gh
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/shurcooL/githubv4"
@@ -22,6 +23,8 @@ type PullRequest struct {
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
 	ClosedAt                   time.Time
+	MergedAt                   time.Time
+	MergedBy                   string
 	Draft                      bool
 	Milestone                  string
 	TotalCommentCount          int
@@ -48,6 +51,7 @@ type pullRequestsQuery struct {
 				CreatedAt          time.Time
 				UpdatedAt          time.Time
 				ClosedAt           time.Time
+				MergedAt           time.Time
 				IsDraft            bool
 				TotalCommentsCount int
 
@@ -58,6 +62,10 @@ type pullRequestsQuery struct {
 				} `graphql:"assignees(first: 10)"`
 
 				Author struct {
+					Login string
+				}
+
+				MergedBy struct {
 					Login string
 				}
 
@@ -103,11 +111,15 @@ type pullRequestsQuery struct {
 				EndCursor   string
 				HasNextPage bool
 			}
-		} `graphql:"pullRequests(first: 40, after: $cursor, states: $state, orderBy: {field: CREATED_AT, direction: DESC})"`
+		} `graphql:"pullRequests(first: 40, after: $cursor, states: $state, orderBy: $orderBy)"`
 	} `graphql:"repository(owner: $owner, name: $repository)"`
 }
 
-func (r Repo) GetAllPullRequestsGQL(states, reviewers []string, limit int, progress func(int)) (*[]PullRequest, error) {
+// GetAllPullRequestsGQL retrieves all pull requests matching the given states. If mergedSince is
+// set only PRs merged at or after that time are returned, and pagination walks PRs by most
+// recently updated so it can stop once it reaches PRs untouched since then (a PR's updatedAt is
+// always >= its mergedAt).
+func (r Repo) GetAllPullRequestsGQL(states, reviewers []string, limit int, mergedSince *time.Time, progress func(int)) (*[]PullRequest, error) {
 	client, ctx, err := r.NewGraphQLClient()
 	if err != nil {
 		return nil, fmt.Errorf("instantiating GraphQL client: %w", err)
@@ -118,7 +130,7 @@ func (r Repo) GetAllPullRequestsGQL(states, reviewers []string, limit int, progr
 	rev := make(map[string]struct{})
 	if len(reviewers) != 0 {
 		for _, reviewer := range reviewers {
-			rev[reviewer] = struct{}{}
+			rev[strings.ToLower(reviewer)] = struct{}{}
 		}
 	}
 
@@ -127,20 +139,36 @@ func (r Repo) GetAllPullRequestsGQL(states, reviewers []string, limit int, progr
 		ghStates = append(ghStates, githubv4.PullRequestState(state))
 	}
 
+	orderBy := githubv4.IssueOrder{Field: githubv4.IssueOrderFieldCreatedAt, Direction: githubv4.OrderDirectionDesc}
+	if mergedSince != nil {
+		orderBy.Field = githubv4.IssueOrderFieldUpdatedAt
+	}
+
 	query := pullRequestsQuery{}
 	variables := map[string]any{
 		"owner":      githubv4.String(r.Owner),
 		"repository": githubv4.String(r.Name),
 		"state":      ghStates,
+		"orderBy":    orderBy,
 		"cursor":     (*githubv4.String)(nil), // Default to nil / null, conditionally update this if there is pagination
 	}
 
 	for {
-		if err := client.Query(ctx, &query, variables); err != nil {
+		if err := QueryWithRetry(ctx, client, &query, variables); err != nil {
 			return nil, err
 		}
 
-		allPRs = append(allPRs, query.flatten(rev)...)
+		prs := query.flatten(rev)
+		if mergedSince != nil {
+			kept := prs[:0]
+			for _, pr := range prs {
+				if !pr.MergedAt.Before(*mergedSince) {
+					kept = append(kept, pr)
+				}
+			}
+			prs = kept
+		}
+		allPRs = append(allPRs, prs...)
 
 		if progress != nil {
 			progress(len(allPRs))
@@ -149,6 +177,15 @@ func (r Repo) GetAllPullRequestsGQL(states, reviewers []string, limit int, progr
 		if !query.Repository.PullRequests.PageInfo.HasNextPage || (limit > 0 && len(allPRs) >= limit) {
 			break
 		}
+
+		// ordered by UPDATED_AT DESC, so once a page ends before mergedSince no later PR can match
+		if mergedSince != nil {
+			nodes := query.Repository.PullRequests.Nodes
+			if len(nodes) > 0 && nodes[len(nodes)-1].UpdatedAt.Before(*mergedSince) {
+				break
+			}
+		}
+
 		variables["cursor"] = githubv4.String(query.Repository.PullRequests.PageInfo.EndCursor)
 	}
 
@@ -169,6 +206,8 @@ func (q pullRequestsQuery) flatten(reviewers map[string]struct{}) []PullRequest 
 			CreatedAt:                pullRequest.CreatedAt,
 			UpdatedAt:                pullRequest.UpdatedAt,
 			ClosedAt:                 pullRequest.ClosedAt,
+			MergedAt:                 pullRequest.MergedAt,
+			MergedBy:                 pullRequest.MergedBy.Login,
 			Draft:                    pullRequest.IsDraft,
 			Milestone:                pullRequest.Milestone.Title,
 			TotalCommentCount:        pullRequest.TotalCommentsCount,
@@ -204,7 +243,7 @@ func (q pullRequestsQuery) flatten(reviewers map[string]struct{}) []PullRequest 
 			pr.ReviewCommentCount += review.Comments.TotalCount
 
 			// Only add filtered review count if `reviewers` filter was provided
-			if _, ok := reviewers[review.Author.Login]; ok {
+			if _, ok := reviewers[strings.ToLower(review.Author.Login)]; ok {
 				pr.FilteredReviewCount++
 				pr.FilteredReviewCommentCount += review.Comments.TotalCount
 			}

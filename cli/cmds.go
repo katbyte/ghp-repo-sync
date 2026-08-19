@@ -55,14 +55,26 @@ func Make(cmdName string) (*cobra.Command, error) {
 		RunE:          CmdIssues,
 	})
 
-	root.AddCommand(&cobra.Command{
+	prsCmd := &cobra.Command{
 		Use:           "prs",
 		Short:         "Sync PRs from a repo to a project",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		PreRunE:       ValidateParams([]string{"token", "repos", "project-owner", "project-number"}),
 		RunE:          CmdPRs,
+	}
+	prsCmd.AddCommand(&cobra.Command{
+		Use:   "refresh",
+		Short: "Refresh fields for closed/merged PRs already on the project board",
+		Long: `Walks the project board and updates fields on PR items that are now closed or merged,
+without crawling the repo's full PR history. Use -r to limit to specific repos, --pr-populate-fields
+to override the default field list, and --dry-run to preview.`,
+		Args:          cobra.NoArgs,
+		SilenceErrors: true,
+		PreRunE:       ValidateParams([]string{"token", "project-owner", "project-number"}),
+		RunE:          CmdPRsRefresh,
 	})
+	root.AddCommand(prsCmd)
 
 	addCmd := &cobra.Command{
 		Use:   "add [field[:type] ...]",

@@ -16,6 +16,7 @@ type FlagData struct {
 	ProjectNumber int
 	ItemLimit     int
 	DryRun        bool
+	Strict        bool
 	Filters       Filters
 
 	// PR field population control
@@ -30,13 +31,18 @@ type FlagData struct {
 type Filters struct {
 	Authors   []string
 	Assignees []string
-	Reviewers []string
-	LabelsOr  []string
-	LabelsAnd []string
-	States    []string
+	MergedBy  []string
+
+	MergedSince string
+	Reviewers   []string
+	LabelsOr    []string
+	LabelsAnd   []string
+	States      []string
 
 	ProjectStatusIs       string
 	ProjectFieldPopulated []string
+
+	FiltersOnly bool // don't auto-include prs already in the project
 }
 
 func configureFlags(root *cobra.Command) error {
@@ -51,6 +57,9 @@ func configureFlags(root *cobra.Command) error {
 
 	pflags.StringSliceVarP(&flags.Filters.Authors, "authors", "a", []string{}, "only sync prs by these authors. ie 'katbyte,author2,author3'")
 	pflags.StringSliceVarP(&flags.Filters.Assignees, "assignees", "", []string{}, "sync prs assigned to these users. ie 'katbyte,assignee2,assignee3'")
+	pflags.StringSliceVarP(&flags.Filters.MergedBy, "merged-by", "", []string{}, "sync prs merged by these users. ie 'katbyte,user2,user3' (only applies to merged prs)")
+	pflags.StringVarP(&flags.Filters.MergedSince, "merged-since", "", "", "only sync prs merged on or after this date, ie '2025-01-01' (implies merged prs only)")
+	pflags.BoolVarP(&flags.Filters.FiltersOnly, "filters-only", "", false, "only sync prs matching the author/assignee/merged-by filters, don't auto-include prs already in the project")
 	pflags.StringSliceVar(&flags.Filters.Reviewers, "reviewers", []string{}, "retrieves number of reviews filtered by these users. ie 'katbyte,reviewer2,reviewer3'. Added as a separate field in addition to the number of total reviews.")
 	pflags.StringSliceVarP(&flags.Filters.LabelsOr, "labels-or", "l", []string{}, "filter that match any label conditions. ie 'label1,label2,-not-this-label'")
 	pflags.StringSliceVarP(&flags.Filters.LabelsAnd, "labels-and", "", []string{}, "filter that match all label conditions. ie 'label1,label2,-not-this-label'")
@@ -66,6 +75,7 @@ func configureFlags(root *cobra.Command) error {
 	pflags.StringSliceVar(&flags.SyncLinkedIssueFields, "sync-linked-issue-fields", []string{}, "copy these field values from linked issues in the project (e.g. 'Status,Due Date,Priority')")
 
 	pflags.BoolVarP(&flags.DryRun, "dry-run", "d", false, "dry run, don't actually add issues/prs to project")
+	pflags.BoolVarP(&flags.Strict, "strict", "", false, "error if a pr field is not found in the project instead of warning and skipping it")
 
 	// binding map for viper/pflag -> env
 	// this is too large now, we need to make a config file
@@ -80,6 +90,9 @@ func configureFlags(root *cobra.Command) error {
 		"project-fields-populated": "GITHUB_PROJECT_FIELDS_POPULATED",
 		"authors":                  "GITHUB_AUTHORS",
 		"assignees":                "GITHUB_ASSIGNEES",
+		"merged-by":                "GITHUB_MERGED_BY",
+		"merged-since":             "GITHUB_MERGED_SINCE",
+		"filters-only":             "GITHUB_FILTERS_ONLY",
 		"reviewers":                "GITHUB_REVIEWERS",
 		"labels-or":                "GITHUB_LABELS_OR",
 		"labels-and":               "GITHUB_LABELS_AND",
@@ -87,6 +100,7 @@ func configureFlags(root *cobra.Command) error {
 		"pr-skip-fields":           "GITHUB_PR_SKIP_FIELDS",
 		"sync-linked-issue-fields": "GITHUB_SYNC_LINKED_ISSUE_FIELDS",
 		"dry-run":                  "",
+		"strict":                   "STRICT",
 	}
 
 	for name, env := range m {
@@ -133,10 +147,14 @@ func GetFlags() FlagData {
 		ItemLimit: viper.GetInt("item-limit"),
 
 		DryRun: viper.GetBool("dry-run"),
+		Strict: viper.GetBool("strict"),
 
 		Filters: Filters{
 			Authors:               GetStringSliceFixed("authors"),
 			Assignees:             GetStringSliceFixed("assignees"),
+			MergedBy:              GetStringSliceFixed("merged-by"),
+			MergedSince:           viper.GetString("merged-since"),
+			FiltersOnly:           viper.GetBool("filters-only"),
 			Reviewers:             GetStringSliceFixed("reviewers"),
 			LabelsOr:              GetStringSliceFixed("labels-or"),
 			LabelsAnd:             GetStringSliceFixed("labels-and"),

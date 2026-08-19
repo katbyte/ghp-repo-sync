@@ -71,7 +71,7 @@ func (p *Project) LoadDetails() error {
             organization(login: $org){
                 projectV2(number: $number) {
                     id
-                    fields(first:40) {
+                    fields(first:100) {
                         nodes {
                             ... on ProjectV2Field {
                                 id
@@ -84,6 +84,10 @@ func (p *Project) LoadDetails() error {
                                     id
                                     name
                                 }
+                            }
+                            ... on ProjectV2IterationField {
+                                id
+                                name
                             }
                         }
                     }
@@ -112,6 +116,10 @@ func (p *Project) LoadDetails() error {
 	}
 
 	for _, f := range result.Data.Organization.ProjectV2.Fields.Nodes {
+		if f.ID == "" {
+			continue // field type not covered by the query fragments
+		}
+
 		field := struct {
 			ID      string
 			Name    string

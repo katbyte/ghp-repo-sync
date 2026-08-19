@@ -119,7 +119,7 @@ func GetFilterForAuthors(authors []string) *Filter {
 
 	authorMap := map[string]bool{}
 	for _, a := range authors {
-		authorMap[a] = true
+		authorMap[strings.ToLower(a)] = true
 	}
 
 	c.Printf("  authors: <magenta>%s</>\n", strings.Join(authors, "</>,<magenta>"))
@@ -129,7 +129,7 @@ func GetFilterForAuthors(authors []string) *Filter {
 		Issue: func(issue github.Issue) (bool, error) {
 			author := issue.User.GetLogin()
 
-			if _, ok := authorMap[author]; ok {
+			if _, ok := authorMap[strings.ToLower(author)]; ok {
 				c.Printf("    author: <green>%s</>\n", author)
 				return true, nil
 			}
