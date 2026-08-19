@@ -35,6 +35,8 @@ type PullRequest struct {
 
 	ClosingIssues            []ClosingIssue
 	Assignees                []string
+	ReviewedBy               []string // left a changes requested, commented, or dismissed review
+	ApprovedBy               []string // left an approving review
 	AssociatedLabels         map[string]bool
 	AssociatedProjectNumbers map[int]bool
 }
@@ -234,8 +236,24 @@ func (q pullRequestsQuery) flatten(reviewers map[string]struct{}) []PullRequest 
 			pr.AssociatedLabels[label.Name] = true
 		}
 
+		reviewedBy := map[string]bool{}
+		approvedBy := map[string]bool{}
 		for _, review := range pullRequest.Reviews.Nodes {
-			// We're only interested in `APPROVED`, `CHANGES_REQUESTED`, and `DISMISSED` states.
+			// collect who reviewed vs approved, deduplicated but preserving order
+			switch review.State {
+			case string(githubv4.PullRequestReviewStateApproved):
+				if !approvedBy[review.Author.Login] {
+					approvedBy[review.Author.Login] = true
+					pr.ApprovedBy = append(pr.ApprovedBy, review.Author.Login)
+				}
+			case string(githubv4.PullRequestReviewStateChangesRequested), string(githubv4.PullRequestReviewStateCommented), string(githubv4.PullRequestReviewStateDismissed):
+				if !reviewedBy[review.Author.Login] {
+					reviewedBy[review.Author.Login] = true
+					pr.ReviewedBy = append(pr.ReviewedBy, review.Author.Login)
+				}
+			}
+
+			// We're only interested in `APPROVED`, `CHANGES_REQUESTED`, and `DISMISSED` states for counts.
 			if review.State == string(githubv4.PullRequestReviewStateCommented) || review.State == string(githubv4.PullRequestReviewStatePending) {
 				continue
 			}

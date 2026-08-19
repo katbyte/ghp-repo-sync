@@ -63,7 +63,7 @@ func Make(cmdName string) (*cobra.Command, error) {
 		PreRunE:       ValidateParams([]string{"token", "repos", "project-owner", "project-number"}),
 		RunE:          CmdPRs,
 	}
-	prsCmd.AddCommand(&cobra.Command{
+	refreshCmd := &cobra.Command{
 		Use:   "refresh",
 		Short: "Refresh fields for closed/merged PRs already on the project board",
 		Long: `Walks the project board and updates fields on PR items that are now closed or merged,
@@ -73,7 +73,15 @@ to override the default field list, and --dry-run to preview.`,
 		SilenceErrors: true,
 		PreRunE:       ValidateParams([]string{"token", "project-owner", "project-number"}),
 		RunE:          CmdPRsRefresh,
-	})
+	}
+	refreshCmd.Flags().Bool("include-open", false, "also refresh open prs, limited to fields safe without full pr data (PR#, User, Created At, Open Days, Reviewed By, Approved By)")
+	if err := viper.BindPFlag("include-open", refreshCmd.Flags().Lookup("include-open")); err != nil {
+		return nil, fmt.Errorf("error binding 'include-open' flag: %w", err)
+	}
+	if err := viper.BindEnv("include-open", "GITHUB_INCLUDE_OPEN"); err != nil {
+		return nil, fmt.Errorf("error binding 'include-open' to env: %w", err)
+	}
+	prsCmd.AddCommand(refreshCmd)
 	root.AddCommand(prsCmd)
 
 	addCmd := &cobra.Command{

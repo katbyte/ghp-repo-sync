@@ -76,6 +76,27 @@ func (r Repo) GetAllPullRequests(state string) (*[]github.PullRequest, error) {
 	return &allPRs, nil
 }
 
+// GetPullRequestReviews returns all reviews for a PR in submission order (oldest first).
+func (r Repo) GetPullRequestReviews(pr int) ([]*github.PullRequestReview, error) {
+	client, ctx := r.NewClient()
+
+	var all []*github.PullRequestReview
+	opts := &github.ListOptions{PerPage: 100}
+	for {
+		reviews, resp, err := client.PullRequests.ListReviews(ctx, r.Owner, r.Name, pr, opts)
+		if err != nil {
+			return nil, fmt.Errorf("unable to list reviews for PR %d in %s/%s: %w", pr, r.Owner, r.Name, err)
+		}
+		all = append(all, reviews...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return all, nil
+}
+
 func (r Repo) GetPullRequest(pr int) (*github.PullRequest, error) {
 	client, ctx := r.NewClient()
 

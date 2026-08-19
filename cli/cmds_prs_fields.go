@@ -70,6 +70,24 @@ var PRFields = map[string]PRFieldDef{
 			return ctx.PR.Author
 		},
 	},
+	"Reviewed By": {
+		Type: gh.ItemValueTypeText,
+		ComputeFn: func(ctx PRFieldContext) any {
+			if len(ctx.PR.ReviewedBy) == 0 {
+				return nil
+			}
+			return strings.Join(ctx.PR.ReviewedBy, ", ")
+		},
+	},
+	"Approved By": {
+		Type: gh.ItemValueTypeText,
+		ComputeFn: func(ctx PRFieldContext) any {
+			if len(ctx.PR.ApprovedBy) == 0 {
+				return nil
+			}
+			return strings.Join(ctx.PR.ApprovedBy, ", ")
+		},
+	},
 	"Merged By": {
 		Type: gh.ItemValueTypeText,
 		ComputeFn: func(ctx PRFieldContext) any {

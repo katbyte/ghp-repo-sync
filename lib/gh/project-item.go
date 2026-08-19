@@ -190,7 +190,7 @@ func (p *Project) GetItems() ([]ProjectItem, error) {
       						}
 							status:fieldValueByName(name:"Status") {
 								... on ProjectV2ItemFieldSingleSelectValue {
-									singleSelectOptionId		
+									singleSelectOptionId: optionId
 								}	
 							}		
 							content {
