@@ -14,12 +14,13 @@ import (
 // prRefreshDefaultFields are the fields refreshed by default for closed/merged PRs. Fields needing
 // data we don't fetch here (review counts, waiting days) are excluded so we don't overwrite real
 // values with zeros; use --pr-populate-fields to override.
-var prRefreshDefaultFields = []string{"Status", "PR#", "User", "Open Days", "Created At", "Closed At", "Merged At", "Merged By", "Reviewed By", "Approved By"}
+var prRefreshDefaultFields = []string{"Status", "PR#", "User", "Open Days", "Created At", "Closed At", "Merged At", "Merged By", "Reviewed By", "Approved By", "Changes Requested By", "CI", "Mergeable"}
 
 // prRefreshOpenFields are the fields safe to refresh on open PRs with --include-open: the REST
 // lookup can't see the review decision, so Status would incorrectly knock "Approved" PRs back
-// to "Waiting", and waiting/count data isn't available at all.
-var prRefreshOpenFields = map[string]bool{"PR#": true, "User": true, "Created At": true, "Open Days": true, "Reviewed By": true, "Approved By": true}
+// to "Waiting", and waiting/count data isn't available at all. CI/Mergeable are fetched
+// separately via GraphQL when needed.
+var prRefreshOpenFields = map[string]bool{"PR#": true, "User": true, "Created At": true, "Open Days": true, "Reviewed By": true, "Approved By": true, "Changes Requested By": true, "CI": true, "Mergeable": true}
 
 // CmdPRsRefresh walks the project board itself and refreshes fields on PR items that are now
 // closed or merged, rather than syncing PRs from a repo. This catches PRs that were added while
@@ -64,10 +65,16 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 		prFields = append(prFields, fieldName)
 	}
 
-	needReviews := false
+	needReviews, needChangesRequested, needMergeable := false, false, false
 	for _, fieldName := range prFields {
-		if fieldName == "Reviewed By" || fieldName == "Approved By" {
+		if fieldName == "Reviewed By" || fieldName == "Approved By" || fieldName == "Changes Requested By" {
 			needReviews = true
+		}
+		if fieldName == "Changes Requested By" {
+			needChangesRequested = true
+		}
+		if fieldName == "CI" || fieldName == "Mergeable" {
+			needMergeable = true
 		}
 	}
 
@@ -98,7 +105,7 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 	c.Printf("<yellow>%d</>\n\n", len(items))
 
 	repos := map[string]*gh.Repo{}
-	refreshed, skippedOpen := 0, 0
+	refreshed, unchanged, skippedOpen := 0, 0, 0
 	byStatus := map[string][]int{}
 
 	for i, item := range items {
@@ -166,6 +173,15 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 			Milestone: rpr.GetMilestone().GetTitle(),
 		}
 
+		if needMergeable && isOpen {
+			mergeable, checkState, msErr := r.GetPullRequestMergeStatus(number)
+			if msErr != nil {
+				c.Printf("<yellow>WARNING: getting merge status:</> %s ", msErr)
+			}
+			pr.Mergeable = mergeable
+			pr.CheckState = checkState
+		}
+
 		if needReviews {
 			reviews, reviewsErr := r.GetPullRequestReviews(number)
 			if reviewsErr != nil {
@@ -173,6 +189,11 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 			}
 			reviewedBy := map[string]bool{}
 			approvedBy := map[string]bool{}
+			type changeRequest struct {
+				login    string
+				reviewID int64
+			}
+			var changeRequests []changeRequest
 			for _, review := range reviews {
 				login := review.GetUser().GetLogin()
 				switch review.GetState() {
@@ -185,6 +206,33 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 					if !reviewedBy[login] {
 						reviewedBy[login] = true
 						pr.ReviewedBy = append(pr.ReviewedBy, login)
+					}
+					if review.GetState() == "CHANGES_REQUESTED" && needChangesRequested {
+						changeRequests = append(changeRequests, changeRequest{login: login, reviewID: review.GetID()})
+					}
+				}
+			}
+
+			// the review list api doesn't include per-review comment counts, so fetch the PR's
+			// review comments (each tagged with its review id) and tally them per change request
+			if len(changeRequests) > 0 {
+				commentsPerReview := map[int64]int{}
+				comments, commentsErr := r.GetPullRequestReviewComments(number)
+				if commentsErr != nil {
+					c.Printf("<yellow>WARNING: getting review comments:</> %s ", commentsErr)
+				}
+				for _, comment := range comments {
+					commentsPerReview[comment.GetPullRequestReviewID()]++
+				}
+
+				requestedBy := map[string]int{} // login -> index into pr.ChangesRequestedBy
+				for _, cr := range changeRequests {
+					if idx, ok := requestedBy[cr.login]; ok {
+						pr.ChangesRequestedBy[idx].Requests++
+						pr.ChangesRequestedBy[idx].Comments += commentsPerReview[cr.reviewID]
+					} else {
+						requestedBy[cr.login] = len(pr.ChangesRequestedBy)
+						pr.ChangesRequestedBy = append(pr.ChangesRequestedBy, gh.ReviewerCommentCount{Login: cr.login, Requests: 1, Comments: commentsPerReview[cr.reviewID]})
 					}
 				}
 			}
@@ -218,27 +266,53 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 			Status:   statusText,
 		}
 
+		type fieldChange struct {
+			name     string
+			from, to any
+		}
+
 		var fields []gh.ProjectItemField
+		var changes []fieldChange
 		for _, fieldName := range itemFields {
+			fieldType := PRFields[fieldName].Type
 			value := PRFields[fieldName].ComputeFn(fieldCtx)
 			if value == nil {
+				continue
+			}
+
+			current, exists := item.FieldValues[fieldName]
+			if prFieldValueUnchanged(fieldType, current, exists, value) {
 				continue
 			}
 
 			fields = append(fields, gh.ProjectItemField{
 				Name:    strings.ToLower(strings.NewReplacer(" ", "_", "#", "").Replace(fieldName)),
 				FieldID: p.FieldIDs[fieldName],
-				Type:    PRFields[fieldName].Type,
+				Type:    fieldType,
 				Value:   value,
 			})
+
+			from := any("(unset)")
+			if exists {
+				from = displayFieldValue(p, fieldName, fieldType, current.Value)
+			}
+			to := displayFieldValue(p, fieldName, fieldType, value)
+			if fieldType == gh.ItemValueTypeDate {
+				to = trimToDay(fmt.Sprint(to))
+			}
+			changes = append(changes, fieldChange{name: fieldName, from: from, to: to})
+		}
+
+		if len(fields) == 0 {
+			c.Printf("<gray>up to date</>\n")
+			unchanged++
+			continue
 		}
 
 		if f.DryRun {
 			c.Printf("<yellow>[dry-run: would update %d fields]</>\n", len(fields))
-			for _, fieldName := range itemFields {
-				if value := PRFields[fieldName].ComputeFn(fieldCtx); value != nil {
-					c.Printf("    <gray>[dry-run]</> <lightBlue>%s</> = <white>%v</>\n", fieldName, displayFieldValue(p, fieldName, PRFields[fieldName].Type, value))
-				}
+			for _, ch := range changes {
+				c.Printf("    <gray>[dry-run]</> <lightBlue>%s</>: <darkGray>%v</> <gray>-></> <white>%v</>\n", ch.name, ch.from, ch.to)
 			}
 		} else {
 			if err = p.UpdateItem(item.ID, fields); err != nil {
@@ -246,6 +320,9 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 				continue
 			}
 			c.Printf("<lightGreen>✓ %d fields</>\n", len(fields))
+			for _, ch := range changes {
+				c.Printf("    <lightBlue>%s</>: <darkGray>%v</> <gray>-></> <white>%v</>\n", ch.name, ch.from, ch.to)
+			}
 		}
 
 		refreshed++
@@ -256,7 +333,48 @@ func CmdPRsRefresh(_ *cobra.Command, _ []string) error {
 	for k := range byStatus {
 		c.Printf("<cyan>%s</><gray>x%d -</> %s\n", k, len(byStatus[k]), strings.Trim(strings.ReplaceAll(fmt.Sprint(byStatus[k]), " ", ","), "[]"))
 	}
-	c.Printf("refreshed <lightGreen>%d</> items, skipped <yellow>%d</> still open\n", refreshed, skippedOpen)
+	c.Printf("refreshed <lightGreen>%d</> items, <gray>%d</> up to date, skipped <yellow>%d</> still open\n", refreshed, unchanged, skippedOpen)
 
 	return nil
+}
+
+// prFieldValueUnchanged reports whether the computed value matches the item's current board value.
+// Date fields are compared on the day only, as the project stores dates without a time component.
+func prFieldValueUnchanged(t gh.ItemValueType, current gh.ProjectItemFieldValue, exists bool, value any) bool {
+	switch t {
+	case gh.ItemValueTypeNumber:
+		if !exists {
+			return false
+		}
+		cur, ok := current.Value.(float64)
+		if !ok {
+			return false
+		}
+		switch v := value.(type) {
+		case int:
+			return cur == float64(v)
+		case float64:
+			return cur == v
+		}
+		return false
+	case gh.ItemValueTypeDate:
+		cur := ""
+		if exists {
+			cur, _ = current.Value.(string)
+		}
+		return trimToDay(cur) == trimToDay(fmt.Sprint(value))
+	default: // text and single select option IDs compare as strings; unset counts as empty
+		cur := ""
+		if exists {
+			cur, _ = current.Value.(string)
+		}
+		return cur == fmt.Sprint(value)
+	}
+}
+
+func trimToDay(s string) string {
+	if len(s) > 10 {
+		return s[:10]
+	}
+	return s
 }

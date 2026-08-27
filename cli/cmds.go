@@ -74,7 +74,7 @@ to override the default field list, and --dry-run to preview.`,
 		PreRunE:       ValidateParams([]string{"token", "project-owner", "project-number"}),
 		RunE:          CmdPRsRefresh,
 	}
-	refreshCmd.Flags().Bool("include-open", false, "also refresh open prs, limited to fields safe without full pr data (PR#, User, Created At, Open Days, Reviewed By, Approved By)")
+	refreshCmd.Flags().Bool("include-open", false, "also refresh open prs, limited to fields safe without full pr data (PR#, User, Created At, Open Days, Reviewed By, Approved By, Changes Requested By)")
 	if err := viper.BindPFlag("include-open", refreshCmd.Flags().Lookup("include-open")); err != nil {
 		return nil, fmt.Errorf("error binding 'include-open' flag: %w", err)
 	}

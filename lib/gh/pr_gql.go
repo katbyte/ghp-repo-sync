@@ -13,6 +13,14 @@ type ClosingIssue struct {
 	Number int
 }
 
+// ReviewerCommentCount pairs a reviewer login with how many reviews of a given state they left
+// (e.g. changes requested) and the total number of review comments across those reviews.
+type ReviewerCommentCount struct {
+	Login    string
+	Requests int
+	Comments int
+}
+
 type PullRequest struct {
 	NodeID                     string
 	Author                     string
@@ -27,6 +35,8 @@ type PullRequest struct {
 	MergedBy                   string
 	Draft                      bool
 	Milestone                  string
+	Mergeable                  string // MERGEABLE, CONFLICTING, or UNKNOWN (github may still be computing)
+	CheckState                 string // combined CI state of the head commit: SUCCESS, FAILURE, ERROR, PENDING, EXPECTED, or "" when the PR has no checks
 	TotalCommentCount          int
 	TotalReviewCount           int
 	ReviewCommentCount         int
@@ -35,8 +45,9 @@ type PullRequest struct {
 
 	ClosingIssues            []ClosingIssue
 	Assignees                []string
-	ReviewedBy               []string // left a changes requested, commented, or dismissed review
-	ApprovedBy               []string // left an approving review
+	ReviewedBy               []string               // left a changes requested, commented, or dismissed review
+	ApprovedBy               []string               // left an approving review
+	ChangesRequestedBy       []ReviewerCommentCount // requested changes, ordered by first request, with comment totals across all their change requests
 	AssociatedLabels         map[string]bool
 	AssociatedProjectNumbers map[int]bool
 }
@@ -55,7 +66,18 @@ type pullRequestsQuery struct {
 				ClosedAt           time.Time
 				MergedAt           time.Time
 				IsDraft            bool
+				Mergeable          string
 				TotalCommentsCount int
+
+				Commits struct {
+					Nodes []struct {
+						Commit struct {
+							StatusCheckRollup struct {
+								State string
+							}
+						}
+					}
+				} `graphql:"commits(last: 1)"`
 
 				Assignees struct {
 					Nodes []struct {
@@ -212,9 +234,14 @@ func (q pullRequestsQuery) flatten(reviewers map[string]struct{}) []PullRequest 
 			MergedBy:                 pullRequest.MergedBy.Login,
 			Draft:                    pullRequest.IsDraft,
 			Milestone:                pullRequest.Milestone.Title,
+			Mergeable:                pullRequest.Mergeable,
 			TotalCommentCount:        pullRequest.TotalCommentsCount,
 			AssociatedLabels:         make(map[string]bool),
 			AssociatedProjectNumbers: make(map[int]bool),
+		}
+
+		if nodes := pullRequest.Commits.Nodes; len(nodes) > 0 {
+			pr.CheckState = nodes[0].Commit.StatusCheckRollup.State
 		}
 
 		for _, assignee := range pullRequest.Assignees.Nodes {
@@ -238,7 +265,19 @@ func (q pullRequestsQuery) flatten(reviewers map[string]struct{}) []PullRequest 
 
 		reviewedBy := map[string]bool{}
 		approvedBy := map[string]bool{}
+		changesRequestedBy := map[string]int{} // login -> index into pr.ChangesRequestedBy
 		for _, review := range pullRequest.Reviews.Nodes {
+			// requesters ordered by their first change request, comment counts summed across all of them
+			if review.State == string(githubv4.PullRequestReviewStateChangesRequested) {
+				if idx, ok := changesRequestedBy[review.Author.Login]; ok {
+					pr.ChangesRequestedBy[idx].Requests++
+					pr.ChangesRequestedBy[idx].Comments += review.Comments.TotalCount
+				} else {
+					changesRequestedBy[review.Author.Login] = len(pr.ChangesRequestedBy)
+					pr.ChangesRequestedBy = append(pr.ChangesRequestedBy, ReviewerCommentCount{Login: review.Author.Login, Requests: 1, Comments: review.Comments.TotalCount})
+				}
+			}
+
 			// collect who reviewed vs approved, deduplicated but preserving order
 			switch review.State {
 			case string(githubv4.PullRequestReviewStateApproved):
@@ -271,4 +310,66 @@ func (q pullRequestsQuery) flatten(reviewers map[string]struct{}) []PullRequest 
 	}
 
 	return result
+}
+
+type pullRequestMergeStatusQuery struct {
+	Repository struct {
+		PullRequest struct {
+			Mergeable string
+
+			Commits struct {
+				Nodes []struct {
+					Commit struct {
+						StatusCheckRollup struct {
+							State string
+						}
+					}
+				}
+			} `graphql:"commits(last: 1)"`
+		} `graphql:"pullRequest(number: $prNumber)"`
+	} `graphql:"repository(owner: $owner, name: $repository)"`
+}
+
+// mergeableAttempts and mergeableRetryDelay control how long GetPullRequestMergeStatus waits
+// for github to finish computing a PR's mergeability (the computation is asynchronous and
+// querying the PR is what kicks it off). Same pattern as tctest's GetPrForBuild.
+const (
+	mergeableAttempts   = 5
+	mergeableRetryDelay = 3 * time.Second
+)
+
+// GetPullRequestMergeStatus returns a single PR's mergeable state (MERGEABLE/CONFLICTING/UNKNOWN)
+// and the combined CI state of its head commit (SUCCESS/FAILURE/ERROR/PENDING/EXPECTED, or ""
+// when the PR has no checks). While github reports UNKNOWN it retries for a bit, as the query
+// itself triggers the async mergeability computation; UNKNOWN is returned only if it never settles.
+func (r Repo) GetPullRequestMergeStatus(number int) (mergeable, checkState string, err error) {
+	client, ctx, err := r.NewGraphQLClient()
+	if err != nil {
+		return "", "", fmt.Errorf("instantiating GraphQL client: %w", err)
+	}
+
+	query := pullRequestMergeStatusQuery{}
+	variables := map[string]any{
+		"owner":      githubv4.String(r.Owner),
+		"repository": githubv4.String(r.Name),
+		"prNumber":   githubv4.Int(number), //nolint:gosec // pr numbers don't overflow int32
+	}
+
+	for attempt := 1; ; attempt++ {
+		if err := QueryWithRetry(ctx, client, &query, variables); err != nil {
+			return "", "", err
+		}
+
+		mergeable = query.Repository.PullRequest.Mergeable
+		if mergeable != "UNKNOWN" || attempt >= mergeableAttempts {
+			break
+		}
+		time.Sleep(mergeableRetryDelay)
+	}
+
+	if nodes := query.Repository.PullRequest.Commits.Nodes; len(nodes) > 0 {
+		checkState = nodes[0].Commit.StatusCheckRollup.State
+	}
+
+	return mergeable, checkState, nil
 }

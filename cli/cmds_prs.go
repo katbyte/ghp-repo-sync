@@ -76,6 +76,13 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 	f.PRFields = prFields
 	fmt.Println()
 
+	needMergeStatus := false
+	for _, fieldName := range f.PRFields {
+		if fieldName == "Mergeable" {
+			needMergeStatus = true
+		}
+	}
+
 	// Print config summary
 	c.Printf("<white>Configuration:</>\n")
 	c.Printf("  <lightBlue>repos</>:        ")
@@ -235,6 +242,19 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 			byStatus[statusText] = append(byStatus[statusText], pr.Number)
 
 			c.Printf("  open %d days, waiting %d days\n", daysOpen, daysWaiting)
+
+			// github computes mergeability lazily and the bulk query doesn't wait for it;
+			// re-query the pr (which also kicks off the computation) with retries so we
+			// only stamp a ? when it truly never settles
+			if needMergeStatus && strings.EqualFold(pr.State, "open") && pr.Mergeable == "UNKNOWN" {
+				c.Printf("  <gray>mergeability unknown, waiting for github..</> ")
+				if mergeable, checkState, msErr := r.GetPullRequestMergeStatus(pr.Number); msErr != nil {
+					c.Printf("<yellow>WARNING:</> %s\n", msErr)
+				} else {
+					pr.Mergeable, pr.CheckState = mergeable, checkState
+					c.Printf("<white>%s</>\n", mergeable)
+				}
+			}
 
 			// Build field context for computing values
 			fieldCtx := PRFieldContext{

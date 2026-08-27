@@ -4,6 +4,9 @@
 - add `--filters-only` to disable auto-including PRs already in the project
 - add `prs refresh` subcommand to update closed/merged PR items already on the board, with `--include-open` to also refresh a safe subset of fields on open PRs
 - add new PR fields: `Merged By`, `Merged At`, `Reviewed By`, `Approved By`
+- add `Changes Requested By` PR field: reviewers who requested changes in order of first request, each with their request count and total comments across those requests, e.g. `sreallymatt(×2 ✎10), katbyte(×1 ✎1)`
+- `prs refresh` now diffs against current board values: only changed fields are updated, output shows `field: old -> new`, and up-to-date items are skipped
+- add `CI` (`✅` passing, `❌` failing, `🕒` running) and `Mergeable` (`✅` clean, `❌` merge conflicts, `?` unknown) PR fields; both cleared when a PR closes, and `prs refresh --include-open` fetches them live for open PRs. When github hasn't computed mergeability yet the pr is re-queried with retries (as in tctest) so `?` is only stamped when it never settles
 - make author/assignee/merged-by/reviewer login matching case-insensitive
 - missing project fields now warn and skip by default instead of erroring; add `--strict` to error instead
 - dry run now prints each field value, and sync output shows why each PR matched the filters plus a link to the PR
