@@ -405,7 +405,7 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 
 // FilterByFlags returns the PRs matching the user filters along with a map of pr number ->
 // why it matched. A nil map means no filters were active and everything was kept.
-func FilterByFlags(f FlagData, prs *[]gh.PullRequest) (*[]gh.PullRequest, map[int]string) {
+func FilterByFlags(f FlagData, prs *[]gh.PullRequest) (matched *[]gh.PullRequest, matchReasons map[int]string) {
 	if len(f.Filters.Authors) == 0 && len(f.Filters.Assignees) == 0 && len(f.Filters.MergedBy) == 0 {
 		return prs, nil
 	}
