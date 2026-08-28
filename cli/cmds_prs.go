@@ -76,6 +76,13 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 	f.PRFields = prFields
 	fmt.Println()
 
+	needMergeStatus := false
+	for _, fieldName := range f.PRFields {
+		if fieldName == "Mergeable" {
+			needMergeStatus = true
+		}
+	}
+
 	// Print config summary
 	c.Printf("<white>Configuration:</>\n")
 	c.Printf("  <lightBlue>repos</>:        ")
@@ -236,6 +243,19 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 
 			c.Printf("  open %d days, waiting %d days\n", daysOpen, daysWaiting)
 
+			// github computes mergeability lazily and the bulk query doesn't wait for it;
+			// re-query the pr (which also kicks off the computation) with retries so we
+			// only stamp a ? when it truly never settles
+			if needMergeStatus && strings.EqualFold(pr.State, "open") && pr.Mergeable == "UNKNOWN" {
+				c.Printf("  <gray>mergeability unknown, waiting for github..</> ")
+				if mergeable, checkState, msErr := r.GetPullRequestMergeStatus(pr.Number); msErr != nil {
+					c.Printf("<yellow>WARNING:</> %s\n", msErr)
+				} else {
+					pr.Mergeable, pr.CheckState = mergeable, checkState
+					c.Printf("<white>%s</>\n", mergeable)
+				}
+			}
+
 			// Build field context for computing values
 			fieldCtx := PRFieldContext{
 				PR:          &pr,
@@ -385,7 +405,7 @@ func CmdPRs(_ *cobra.Command, _ []string) error {
 
 // FilterByFlags returns the PRs matching the user filters along with a map of pr number ->
 // why it matched. A nil map means no filters were active and everything was kept.
-func FilterByFlags(f FlagData, prs *[]gh.PullRequest) (*[]gh.PullRequest, map[int]string) {
+func FilterByFlags(f FlagData, prs *[]gh.PullRequest) (matched *[]gh.PullRequest, matchReasons map[int]string) {
 	if len(f.Filters.Authors) == 0 && len(f.Filters.Assignees) == 0 && len(f.Filters.MergedBy) == 0 {
 		return prs, nil
 	}

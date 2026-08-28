@@ -88,6 +88,19 @@ var PRFields = map[string]PRFieldDef{
 			return strings.Join(ctx.PR.ApprovedBy, ", ")
 		},
 	},
+	"Changes Requested By": {
+		Type: gh.ItemValueTypeText,
+		ComputeFn: func(ctx PRFieldContext) any {
+			if len(ctx.PR.ChangesRequestedBy) == 0 {
+				return nil
+			}
+			parts := make([]string, 0, len(ctx.PR.ChangesRequestedBy))
+			for _, reviewer := range ctx.PR.ChangesRequestedBy {
+				parts = append(parts, fmt.Sprintf("%s(×%d ✎%d)", reviewer.Login, reviewer.Requests, reviewer.Comments))
+			}
+			return strings.Join(parts, ", ")
+		},
+	},
 	"Merged By": {
 		Type: gh.ItemValueTypeText,
 		ComputeFn: func(ctx PRFieldContext) any {
@@ -95,6 +108,42 @@ var PRFields = map[string]PRFieldDef{
 				return nil // not merged
 			}
 			return ctx.PR.MergedBy
+		},
+	},
+	"CI": {
+		Type: gh.ItemValueTypeText,
+		ComputeFn: func(ctx PRFieldContext) any {
+			if !strings.EqualFold(ctx.PR.State, "open") {
+				return "" // clear any stale value once the pr is closed/merged
+			}
+
+			switch ctx.PR.CheckState {
+			case "FAILURE", "ERROR":
+				return "❌"
+			case "PENDING", "EXPECTED":
+				return "🕒"
+			case "SUCCESS":
+				return "✅"
+			default:
+				return "" // no checks on this pr
+			}
+		},
+	},
+	"Mergeable": {
+		Type: gh.ItemValueTypeText,
+		ComputeFn: func(ctx PRFieldContext) any {
+			if !strings.EqualFold(ctx.PR.State, "open") {
+				return "" // clear any stale value once the pr is closed/merged
+			}
+
+			switch ctx.PR.Mergeable {
+			case "CONFLICTING":
+				return "❌"
+			case "MERGEABLE":
+				return "✅"
+			default:
+				return "?" // UNKNOWN - github never finished computing mergeability
+			}
 		},
 	},
 	"Open Days": {

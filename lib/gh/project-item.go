@@ -139,6 +139,18 @@ type ProjectItemsResult struct {
 						DueDate *struct {
 							Date string `json:"date"`
 						} `json:"dueDate"`
+						FieldValues struct {
+							Nodes []struct {
+								Typename             string  `json:"__typename"`
+								Text                 string  `json:"text"`
+								Number               float64 `json:"number"`
+								Date                 string  `json:"date"`
+								SingleSelectOptionID string  `json:"singleSelectOptionId"`
+								Field                struct {
+									Name string `json:"name"`
+								} `json:"field"`
+							} `json:"nodes"`
+						} `json:"fieldValues"`
 						Content struct {
 							ID    string `json:"id"`
 							Title string `json:"title"`
@@ -159,7 +171,8 @@ type ProjectItem struct {
 	RequestType string
 	DueDate     string
 	Status      string
-	NodeID      string // actual pr/issue node id
+	NodeID      string                           // actual pr/issue node id
+	FieldValues map[string]ProjectItemFieldValue // current board values keyed by field name
 }
 
 // GetItems returns all items in the project.
@@ -191,8 +204,29 @@ func (p *Project) GetItems() ([]ProjectItem, error) {
 							status:fieldValueByName(name:"Status") {
 								... on ProjectV2ItemFieldSingleSelectValue {
 									singleSelectOptionId: optionId
-								}	
-							}		
+								}
+							}
+							fieldValues(first: 50) {
+								nodes {
+									__typename
+									... on ProjectV2ItemFieldTextValue {
+										text
+										field { ... on ProjectV2FieldCommon { name } }
+									}
+									... on ProjectV2ItemFieldNumberValue {
+										number
+										field { ... on ProjectV2FieldCommon { name } }
+									}
+									... on ProjectV2ItemFieldDateValue {
+										date
+										field { ... on ProjectV2FieldCommon { name } }
+									}
+									... on ProjectV2ItemFieldSingleSelectValue {
+										singleSelectOptionId: optionId
+										field { ... on ProjectV2FieldCommon { name } }
+									}
+								}
+							}
 							content {
 								... on Issue {
 									id
@@ -246,6 +280,20 @@ func (p *Project) GetItems() ([]ProjectItem, error) {
 			}
 			if i.DueDate != nil {
 				item.DueDate = i.DueDate.Date
+			}
+
+			item.FieldValues = map[string]ProjectItemFieldValue{}
+			for _, fv := range i.FieldValues.Nodes {
+				switch fv.Typename {
+				case "ProjectV2ItemFieldTextValue":
+					item.FieldValues[fv.Field.Name] = ProjectItemFieldValue{Type: ItemValueTypeText, Value: fv.Text}
+				case "ProjectV2ItemFieldNumberValue":
+					item.FieldValues[fv.Field.Name] = ProjectItemFieldValue{Type: ItemValueTypeNumber, Value: fv.Number}
+				case "ProjectV2ItemFieldDateValue":
+					item.FieldValues[fv.Field.Name] = ProjectItemFieldValue{Type: ItemValueTypeDate, Value: fv.Date}
+				case "ProjectV2ItemFieldSingleSelectValue":
+					item.FieldValues[fv.Field.Name] = ProjectItemFieldValue{Type: ItemValueTypeSingleSelect, Value: fv.SingleSelectOptionID}
+				}
 			}
 
 			allItems = append(allItems, item)

@@ -97,6 +97,28 @@ func (r Repo) GetPullRequestReviews(pr int) ([]*github.PullRequestReview, error)
 	return all, nil
 }
 
+// GetPullRequestReviewComments returns all review (inline) comments for a PR; each carries the ID
+// of the review it was submitted with in PullRequestReviewID.
+func (r Repo) GetPullRequestReviewComments(pr int) ([]*github.PullRequestComment, error) {
+	client, ctx := r.NewClient()
+
+	var all []*github.PullRequestComment
+	opts := &github.PullRequestListCommentsOptions{ListOptions: github.ListOptions{PerPage: 100}}
+	for {
+		comments, resp, err := client.PullRequests.ListComments(ctx, r.Owner, r.Name, pr, opts)
+		if err != nil {
+			return nil, fmt.Errorf("unable to list review comments for PR %d in %s/%s: %w", pr, r.Owner, r.Name, err)
+		}
+		all = append(all, comments...)
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	return all, nil
+}
+
 func (r Repo) GetPullRequest(pr int) (*github.PullRequest, error) {
 	client, ctx := r.NewClient()
 
