@@ -7,7 +7,7 @@ require (
 	github.com/gookit/color v1.6.1
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/shurcooL/githubv4 v0.0.0-20240727222349-48295856cce7
-	github.com/sirupsen/logrus v1.9.4
+	github.com/sirupsen/logrus v1.10.1
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	golang.org/x/oauth2 v0.36.0
