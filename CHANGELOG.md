@@ -1,4 +1,4 @@
-## Unreleased
+## v0.2.0 (2026-08-27)
 
 - add `--merged-by` and `--merged-since` filters for syncing merged PRs; `--merged-since` walks PRs by update time so it can stop early instead of crawling full repo history
 - add `--filters-only` to disable auto-including PRs already in the project
